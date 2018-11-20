@@ -1,0 +1,173 @@
+---
+title: "Stan demo with Spati data"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Install needed packages if missing
+if (!require(knitr)) install.packages("knitr")
+if (!require(rstan)) install.packages("rstan")
+if (!require(lmfor)) install.packages("lmfor")
+if (!require(nlme)) install.packages("nlme")
+if (!require(brms)) install.packages("brms")
+if (!require(bayesplot)) install.packages("bayesplot")
+```
+
+
+In this notebook, we compare estimating linear mixed-effect models with NLME and Stan. The dataset comes from package "lmfor" and the example is the same that is used in mixed-effect model courses. 
+
+## Preparing the data
+
+```{r}
+library(lmfor)
+data(spati)
+
+# inlude only observations with measured growth
+spati<-spati[spati$id2>0,]
+spati$plot <- with(spati,factor(plot))
+```
+
+## Estimation with NLME
+
+The model estimates future tree growth based on its past growth. The tree measurements come from different plots that may have different growing conditions. The model assumes that the observations within one plot may be correlated with each other. 
+
+```{r}
+library(nlme)
+
+spati_lme <- lme(id1~id2,random=~id2|plot,data=spati)
+summary(spati_lme)
+```
+
+## BRMS package
+
+Bayesian Regression Models with Stan (BRMS) uses Stan underneath, but offers lme4-like syntax for specifying the model
+
+```{r}
+library(rstan)
+library(brms)
+
+# These options allow parallel execution of chains
+rstan_options (auto_write=TRUE)
+options (mc.cores=parallel::detectCores ())
+
+# Estimation takes a while, so the estimated model object is cached to a file
+modelfile <- "models/spati_brm.rds"
+if (file.exists(modelfile))
+{
+  spati_brm <- readRDS(modelfile)
+} else {
+  spati_brm <- brm(formula = id1  ~ id2 + (1 + id2|plot),
+                    data = spati, family = gaussian(),
+                    warmup = 1000, iter = 2000, chains = 4,
+                    control = list(adapt_delta = 0.95))
+
+  saveRDS(spati_brm, file=modelfile)
+}
+
+spati_brm  
+```
+
+In comparison to the LME estimation, all the parameters have now posterior densities instead of point estimates. The BRM estimatation (0.81) of id2 coefficient matches the LME estimation, but now we can inspect its accuracy from the posterior. 
+
+```{r}
+plot(spati_brm, pars=c("b_id2"))
+```
+
+You can also inspect easily the marginal effect between past and future growth
+
+```{r}
+plot(marginal_effects(spati_brm), points = TRUE)
+```
+
+BRMS generates Stan-code for the spesified regression model, and the generated code can be inspected with "stancode" method
+
+```{r}
+#stancode(spati_brm)
+
+```
+
+## RSTAN - Custom Stan-models
+
+Next, we create the same linear mixed-effect model with hand crafted Stan-code where you can tweak all the parts of the model. The model itself is defined in a separate "spati.stan" files and here we only pass the data to it. 
+
+```{r}
+library(rstan)
+
+# Parameters are feeded to Stan model as a list of values
+params <- within(list(),
+               {
+                 N <- nrow(spati)
+                 Y <- as.vector(spati$id1)
+                 X <- cbind(1,as.matrix(spati$id2))   
+                 Z <- X                               # Z is indexed by 'group' so it's not block diagonal matrix
+                 p <- 2                               # fixed-effects
+                 k <- 2                               # random-effects
+                 J <- length(levels(spati$plot))
+                 group <- as.integer(spati$plot)      # group index for data rows
+               })
+
+modelfile <- "models/spati_stan.rds"
+if (file.exists(modelfile))
+{
+  spati_stan <- readRDS(modelfile)
+} else {
+
+  rstan_options(auto_write=TRUE)
+  options(mc.cores=parallel::detectCores()) 
+
+  spati_stan <- stan(file="spati.stan", data=params, warmup=1000, iter=2000, chains=4, control = list(adapt_delta = 0.80))
+  
+  saveRDS(spati_stan, file=modelfile)
+}
+
+```
+
+Once the model has been estimated we can do some inference on it with R. Let's make a sanity check that the Bayesian estimates are close to the LME (and BRM) estimates. Beta should be about 0.81. 
+
+```{r}
+print(spati_stan, pars = c("beta[1]", "beta_Intercept", "sigma_e", "sigma_b[1]", "sigma_b[2]"))
+```
+
+## Posterior predictive check
+
+Our custom Stan-code generates also a posterior predictive density where the in-sample values are feeded to the estimated model. If the model is accurate, it should generate a closely matching density with the original target values.
+
+```{r}
+library(bayesplot)
+
+posterior <- extract(spati_stan, pars = c("Y_rep"))
+posterior_y_50 <- posterior$Y_rep[1:50,]
+
+plot(ppc_dens_overlay(params$Y, posterior_y_50) + 
+       coord_cartesian(xlim = c(-1, 50)))
+
+```
+
+## Variational Bayes estimation
+
+Instead of HMC sampling, Stan allows you to estimate the model also with variational bayes ADVI-algorithm that is significantly faster (but approximate)
+
+```{r}
+library(rstan)
+
+spati_model <- stan_model(file = "spati.stan")
+spati_vb <- vb(spati_model, data=params, output_samples=2000, iter=3000, seed=678)
+
+print(spati_vb, pars = c("beta[1]", "beta_Intercept", "sigma_e", "sigma_b[1]", "sigma_b[2]"))
+```
+
+The estimate of beta (0.82) is quite close tio HMC estimate (0.81). Let's finally check the predicted density of VB model..
+
+```{r}
+library(bayesplot)
+
+posterior <- extract(spati_vb, pars = c("Y_rep"))
+posterior_y_50 <- posterior$Y_rep[1:50,]
+
+plot(ppc_dens_overlay(params$Y, posterior_y_50) + 
+       coord_cartesian(xlim = c(-1, 50)))
+
+```
