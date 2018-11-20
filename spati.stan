@@ -31,13 +31,12 @@ parameters {
   vector<lower=0>[k] sigma_b;     // group-level random-effect standard deviations
   real<lower=0> sigma_e;          // residual standard deviations 
   vector[k] z[J];                 // unscaled group-level effects
-  real<lower=-1,upper=1> ar1;     // autoregressive effect, AR(1)
 }
 
 transformed parameters {
   
   vector[k] b[J];                 // random effects
-  matrix[k, k] D;		              // variance-covariance matrix of random-effects
+  matrix[k, k] D;                 // variance-covariance matrix of random-effects
   
   // Premultiply diagonal matrix [sigma_b] with the Cholesky decomposition L of
   // the correlation matrix D to get variance-covariance matrix of group-level effects
@@ -55,13 +54,6 @@ transformed parameters {
 model { 
   vector[N] mu;
   
-  // Residuals
-  vector[N] e;
-  
-  // Group variables for AR
-  int group_size;
-  int current_group;
- 
   // Priors
   sigma_e ~ student_t(3, 0, 10);
   sigma_b ~ student_t(3, 0, 10);
